@@ -9,6 +9,62 @@ pub enum DType {
     // ...
 }
 
+/// A trait to associate a Rust numeric type with a `DType`.
+pub trait NumericDType {
+    const DTYPE: DType;
+}
+
+// Implement it for the types we care about:
+// impl NumericDType for i32 {
+//     const DTYPE: DType = DType::I32;
+// }
+
+impl NumericDType for f32 {
+    const DTYPE: DType = DType::F32;
+}
+
+impl NumericDType for f64 {
+    const DTYPE: DType = DType::F64;
+}
+
+#[macro_export]
+macro_rules! tensor {
+    // 2D pattern: [[...], [...], ...]
+    ( [ $( [ $( $elem:expr ),* $(,)? ] ),+ $(,)? ] ) => {{
+        // Create a Vec<Vec<_>> from the nested array
+        let data_2d = vec![
+            $(
+                vec![
+                    $( $elem ),*
+                ],
+            )*
+        ];
+        // The outer dimension
+        let outer = data_2d.len();
+        // Inner dimension (assume at least 1 row)
+        let inner = if outer > 0 {
+            data_2d[0].len()
+        } else {
+            0
+        };
+
+        // Flatten into a single Vec<_>
+        let flattened = data_2d.into_iter().flat_map(|row| row.into_iter()).collect::<Vec<_>>();
+
+        // Let Rust infer T from the elements. T must implement NumericDType.
+        $crate::Tensor::new(vec![outer, inner], flattened)
+    }};
+
+    // 1D pattern: [elem, elem, ...]
+    ( [ $( $elem:expr ),* $(,)? ] ) => {{
+        let data_1d = vec![$( $elem ),*];
+        let len = data_1d.len();
+        $crate::Tensor::new(vec![len], data_1d)
+    }};
+
+    // Optionally, you could add more arms for 3D, etc.
+}
+
 impl DType {
     /// Returns the size in bytes for each data type.
     fn size_in_bytes(&self) -> usize {
@@ -19,96 +75,135 @@ impl DType {
     }
 }
 
+// #[derive(Debug, Clone, PartialEq)]
+// pub struct Tensor {
+//     pub shape: Vec<usize>,
+//     pub data: Vec<u8>,
+//     pub dtype: DType,
+// }
+
 #[derive(Debug, Clone, PartialEq)]
-pub struct Tensor {
+pub struct Tensor<T> {
     pub shape: Vec<usize>,
-    pub data: Vec<u8>,
+    pub data: Vec<T>,
     pub dtype: DType,
 }
 
-impl Tensor {
-    /// Construct a Tensor with `dtype = F32` from a `Vec<f32>`.
-    pub fn new_f32(shape: Vec<usize>, data_f32: Vec<f32>) -> Self {
-        // 1. Check shape consistency
+impl<T: NumericDType> Tensor<T> {
+    /// Create a new tensor with the given shape and data.
+    /// Infers the dtype from `T::DTYPE`.
+    pub fn new(shape: Vec<usize>, data: Vec<T>) -> Self {
         let expected_len = shape.iter().product::<usize>();
         assert_eq!(
             expected_len,
-            data_f32.len(),
-            "Shape vs data length mismatch"
+            data.len(),
+            "Shape does not match number of data elements."
         );
-
-        // 2. Convert f32 data into raw bytes
-        let mut bytes = Vec::with_capacity(expected_len * 4);
-        for &val in &data_f32 {
-            bytes.extend_from_slice(&val.to_ne_bytes());
-        }
-
         Tensor {
             shape,
-            dtype: DType::F32,
-            data: bytes,
+            dtype: T::DTYPE,
+            data,
         }
     }
 
-    /// Construct a Tensor with `dtype = F64` from a `Vec<f64>`.
-    pub fn new_f64(shape: Vec<usize>, data_f64: Vec<f64>) -> Self {
-        let expected_len = shape.iter().product::<usize>();
-        assert_eq!(
-            expected_len,
-            data_f64.len(),
-            "Shape vs data length mismatch"
-        );
-
-        let mut bytes = Vec::with_capacity(expected_len * 8);
-        for &val in &data_f64 {
-            bytes.extend_from_slice(&val.to_ne_bytes());
-        }
-
-        Tensor {
-            shape,
-            dtype: DType::F64,
-            data: bytes,
-        }
-    }
-
-    fn as_slice_f32(&self) -> &[f32] {
-        assert_eq!(self.dtype, DType::F32, "Tensor is not f32");
-        let ptr = self.data.as_ptr() as *const f32;
-        let len = self.data.len() / 4;
-        unsafe { std::slice::from_raw_parts(ptr, len) }
-    }
-
-    /// Interpret the internal data as a slice of f64.
-    /// Panics if the dtype is not F64.
-    fn as_slice_f64(&self) -> &[f64] {
-        assert_eq!(self.dtype, DType::F64, "Tensor is not f64");
-        let ptr = self.data.as_ptr() as *const f64;
-        let len = self.data.len() / 8;
-        unsafe { std::slice::from_raw_parts(ptr, len) }
+    pub fn as_slice(&self) -> &[T] {
+        &self.data
     }
 }
 
-impl Add for Tensor {
-    type Output = Tensor;
+// impl Tensor {
+//     /// Construct a Tensor with `dtype = F32` from a `Vec<f32>`.
+//     pub fn new_f32(shape: Vec<usize>, data_f32: Vec<f32>) -> Self {
+//         // 1. Check shape consistency
+//         let expected_len = shape.iter().product::<usize>();
+//         assert_eq!(
+//             expected_len,
+//             data_f32.len(),
+//             "Shape vs data length mismatch"
+//         );
 
-    fn add(self, rhs: Tensor) -> Tensor {
+//         // 2. Convert f32 data into raw bytes
+//         let mut bytes = Vec::with_capacity(expected_len * 4);
+//         for &val in &data_f32 {
+//             bytes.extend_from_slice(&val.to_ne_bytes());
+//         }
+
+//         Tensor {
+//             shape,
+//             dtype: DType::F32,
+//             data: bytes,
+//         }
+//     }
+
+//     /// Construct a Tensor with `dtype = F64` from a `Vec<f64>`.
+//     pub fn new_f64(shape: Vec<usize>, data_f64: Vec<f64>) -> Self {
+//         let expected_len = shape.iter().product::<usize>();
+//         assert_eq!(
+//             expected_len,
+//             data_f64.len(),
+//             "Shape vs data length mismatch"
+//         );
+
+//         let mut bytes = Vec::with_capacity(expected_len * 8);
+//         for &val in &data_f64 {
+//             bytes.extend_from_slice(&val.to_ne_bytes());
+//         }
+
+//         Tensor {
+//             shape,
+//             dtype: DType::F64,
+//             data: bytes,
+//         }
+//     }
+
+//     fn as_slice_f32(&self) -> &[f32] {
+//         assert_eq!(self.dtype, DType::F32, "Tensor is not f32");
+//         let ptr = self.data.as_ptr() as *const f32;
+//         let len = self.data.len() / 4;
+//         unsafe { std::slice::from_raw_parts(ptr, len) }
+//     }
+
+//     /// Interpret the internal data as a slice of f64.
+//     /// Panics if the dtype is not F64.
+//     fn as_slice_f64(&self) -> &[f64] {
+//         assert_eq!(self.dtype, DType::F64, "Tensor is not f64");
+//         let ptr = self.data.as_ptr() as *const f64;
+//         let len = self.data.len() / 8;
+//         unsafe { std::slice::from_raw_parts(ptr, len) }
+//     }
+// }
+
+impl<T: NumericDType> Add for Tensor<T> {
+    type Output = Tensor<T>;
+
+    fn add(self, rhs: Tensor<T>) -> Tensor<T> {
         // 1. Check that shapes match
         assert_eq!(self.shape, rhs.shape, "Shapes must match for add.");
 
         // 2. Check that dtypes match
         assert_eq!(self.dtype, rhs.dtype, "DTypes must match for add.");
 
-        match self.dtype {
+        match T::DTYPE {
             DType::F32 => {
                 // Reinterpret as &[f32]
-                let a = self.as_slice_f32();
-                let b = rhs.as_slice_f32();
+                let a: &[f32] = self.as_slice();
+                let b = rhs.as_slice();
 
                 // We'll produce a new Vec<f32> with the results
                 let mut out = vec![0f32; a.len()];
 
+                // match T::DTYPE {
+                //     DType::F32 => {
+                //         // Dispatch to an f32-add kernel (which may use AVX)
+                //         cpu_add_f32(a, b, &mut out);
+                //     }
+                //     DType::F64 => {
+                //         // Dispatch to an f64-add kernel (similar idea, possibly AVX for double)
+                //         cpu_add_f64(a, b, &mut out);
+                //     }
+                // }
                 // Dispatch to an f32-add kernel (which may use AVX)
-                cpu_add_f32(a, b, &mut out);
+                // cpu_add_f32(a, b, &mut out);
 
                 // Convert `out` into bytes to build a new Tensor
                 let mut out_bytes = Vec::with_capacity(out.len() * 4);
