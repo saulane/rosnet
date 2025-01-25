@@ -1,7 +1,7 @@
 use std::{
     fmt::{self, Display},
     iter::Step,
-    ops::{Add, Mul},
+    ops::{Add, Div, Mul, Sub},
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -203,9 +203,9 @@ pub fn all_coords_of_shape(shape: &[usize]) -> Vec<Vec<usize>> {
 
 impl<T> Tensor<T>
 where
-    T: Add<Output = T> + Copy + Default + std::iter::Sum,
+    T: Add<Output = T> + Mul<Output = T> + Copy + Default + PartialOrd,
 {
-    pub fn sum(self, axis: usize) -> Tensor<T> {
+    fn reduction(self, operator: &dyn Fn(T, T) -> T, axis: usize) -> Tensor<T> {
         assert!(axis < self.shape.len());
         println!("{}", flattened_index(&[0, 1], &self.shape));
         let mut new_shape = self.shape.clone();
@@ -214,17 +214,33 @@ where
 
         for i in 0..new_shape.iter().product() {
             let coords = unflattened_index(i, &new_shape);
-            let mut sum = T::default();
+            let mut res = T::default();
             for j in 0..self.shape[axis] {
                 let mut coords_with_axis = coords.clone();
                 coords_with_axis.insert(axis, j);
                 let flat_index = flattened_index(&coords_with_axis, &self.shape);
-                sum = sum + self.data[flat_index];
+                res = operator(res, self.data[flat_index]);
             }
-            new_data.push(sum);
+            new_data.push(res);
         }
 
         Tensor::new(new_data, new_shape)
+    }
+
+    pub fn sum(self, axis: usize) -> Tensor<T> {
+        self.reduction(&|a, b| a + b, axis)
+    }
+
+    pub fn product(self, axis: usize) -> Tensor<T> {
+        self.reduction(&|a, b| a * b, axis)
+    }
+
+    pub fn max(self, axis: usize) -> Tensor<T> {
+        self.reduction(&|a, b| if a > b { a } else { b }, axis)
+    }
+
+    pub fn min(self, axis: usize) -> Tensor<T> {
+        self.reduction(&|a, b| if a < b { a } else { b }, axis)
     }
 }
 
