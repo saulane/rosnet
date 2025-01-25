@@ -1,5 +1,6 @@
 use std::{
     fmt::{self, Display},
+    iter::Step,
     ops::{Add, Mul},
 };
 
@@ -22,8 +23,25 @@ impl<T> Tensor<T> {
         Tensor { data, shape }
     }
 
+    pub fn arange(start: T, end: T, step: usize) -> Self
+    where
+        T: Add<Output = T> + Copy + Default + Step,
+    {
+        let data: Vec<T> = (start..end).step_by(step).collect();
+        let shape = vec![data.len()];
+        Tensor { data, shape }
+    }
+
     pub fn as_slice(&self) -> &[T] {
         &self.data
+    }
+
+    pub fn reshape(self, shape: Vec<usize>) -> Self {
+        assert_eq!(self.data.len(), shape.iter().product());
+        Tensor {
+            data: self.data,
+            shape,
+        }
     }
 }
 
@@ -140,21 +158,72 @@ where
     }
 }
 
+fn flattened_index(index: &[usize], shape: &[usize]) -> usize {
+    for (i, el) in index.iter().enumerate() {
+        assert!(*el < shape[i]);
+    }
+    index
+        .iter()
+        .zip(shape.iter())
+        .fold(0, |acc, (i, s)| acc * s + i)
+}
+
+fn unflattened_index(index: usize, shape: &[usize]) -> Vec<usize> {
+    let mut result = Vec::with_capacity(shape.len());
+    let mut index = index;
+    for s in shape.iter().rev() {
+        result.push(index % s);
+        index /= s;
+    }
+    result.reverse();
+    result
+}
+
+pub fn all_coords_of_shape(shape: &[usize]) -> Vec<Vec<usize>> {
+    if shape.is_empty() {
+        // No dimensions => one "coordinate": the empty one
+        return vec![vec![]];
+    }
+    // For shape = [d0, d1, ...], we iterate i in [0..d0] and then
+    // do all coords in [d1, ...], appending i in front.
+    let (first_dim, rest) = shape.split_first().unwrap();
+    let tail_coords = all_coords_of_shape(rest);
+
+    let mut coords = Vec::new();
+    for i in 0..*first_dim {
+        for tail in &tail_coords {
+            let mut c = Vec::with_capacity(1 + tail.len());
+            c.push(i);
+            c.extend_from_slice(tail);
+            coords.push(c);
+        }
+    }
+    coords
+}
+
 impl<T> Tensor<T>
 where
     T: Add<Output = T> + Copy + Default + std::iter::Sum,
 {
     pub fn sum(self, axis: usize) -> Tensor<T> {
         assert!(axis < self.shape.len());
+        println!("{}", flattened_index(&[0, 1], &self.shape));
         let mut new_shape = self.shape.clone();
         new_shape.remove(axis);
         let mut new_data = Vec::with_capacity(new_shape.iter().product());
-        for i in 0..self.shape[axis] {
-            let start = i * self.shape[axis + 1];
-            let end = start + self.shape[axis + 1];
-            let sum = self.data[start..end].iter().copied().sum();
+
+        for i in 0..new_shape.iter().product() {
+            let coords = unflattened_index(i, &new_shape);
+            let mut sum = T::default();
+            for j in 0..self.shape[axis] {
+                let mut coords_with_axis = coords.clone();
+                coords_with_axis.insert(axis, j);
+                let flat_index = flattened_index(&coords_with_axis, &self.shape);
+                sum = sum + self.data[flat_index];
+            }
             new_data.push(sum);
         }
+
         Tensor::new(new_data, new_shape)
     }
 }
