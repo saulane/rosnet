@@ -4,6 +4,8 @@ use std::{
     ops::{Add, Div, Mul, Sub},
 };
 
+use rayon::prelude::*;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tensor<T> {
     pub data: Vec<T>,
@@ -159,9 +161,9 @@ where
 }
 
 fn flattened_index(index: &[usize], shape: &[usize]) -> usize {
-    for (i, el) in index.iter().enumerate() {
-        assert!(*el < shape[i]);
-    }
+    // for (i, el) in index.iter().enumerate() {
+    //     assert!(*el < shape[i]);
+    // }
     index
         .iter()
         .zip(shape.iter())
@@ -201,47 +203,137 @@ pub fn all_coords_of_shape(shape: &[usize]) -> Vec<Vec<usize>> {
     coords
 }
 
+fn compute_strides(shape: &[usize]) -> Vec<usize> {
+    let mut strides = Vec::with_capacity(shape.len());
+    let mut acc = 1;
+    // Work from the last dimension backwards
+    for &dim in shape.iter().rev() {
+        strides.push(acc);
+        acc *= dim;
+    }
+    // We built them in reverse order, so reverse them back
+    strides.reverse();
+    strides
+}
+
 impl<T> Tensor<T>
 where
-    T: Add<Output = T> + Mul<Output = T> + Copy + Default + PartialOrd,
+    T: Add<Output = T>
+        + Mul<Output = T>
+        + Copy
+        + Default
+        + PartialOrd
+        + Send
+        + Sync
+        + std::fmt::Debug,
 {
-    fn reduction(self, operator: &dyn Fn(T, T) -> T, axis: usize) -> Tensor<T> {
+    fn reduction<F>(self, operator: F, axis: usize) -> Tensor<T>
+    where
+        F: Fn(&[T]) -> T + Send + Sync,
+    {
+        let rank = self.shape.len();
+        let axis_len = self.shape[axis];
         assert!(axis < self.shape.len());
-        println!("{}", flattened_index(&[0, 1], &self.shape));
-        let mut new_shape = self.shape.clone();
-        new_shape.remove(axis);
-        let mut new_data = Vec::with_capacity(new_shape.iter().product());
+        let mut out_shape = self.shape.clone();
+        out_shape.remove(axis);
 
-        for i in 0..new_shape.iter().product() {
-            let coords = unflattened_index(i, &new_shape);
-            let mut res = T::default();
-            for j in 0..self.shape[axis] {
-                let mut coords_with_axis = coords.clone();
-                coords_with_axis.insert(axis, j);
-                let flat_index = flattened_index(&coords_with_axis, &self.shape);
-                res = operator(res, self.data[flat_index]);
-            }
-            new_data.push(res);
+        let out_size: usize = out_shape.iter().product();
+        let mut out_data = vec![T::default(); out_size];
+        if axis == self.shape.len() - 1 {
+            out_data.par_iter_mut().enumerate().for_each(|(i, out)| {
+                *out = operator(&self.data[i * axis_len..i * axis_len + axis_len]);
+            });
+            return Tensor::new(out_data, out_shape);
+        } else if axis == 0 {
+            let shift: usize = self.shape[1..].iter().product();
+            out_data.par_iter_mut().enumerate().for_each(|(i, out)| {
+                let mut data = Vec::with_capacity(axis_len);
+                for j in 0..self.shape[axis] {
+                    data.push(self.data[i + j * shift]);
+                }
+                *out = operator(&data);
+            });
+            return Tensor::new(out_data, out_shape);
         }
 
-        Tensor::new(new_data, new_shape)
+        let strides = compute_strides(&self.shape);
+        let axis_stride = strides[axis];
+
+        let mut dims_no_axis = Vec::with_capacity(rank - 1);
+        for i in 0..rank {
+            if i != axis {
+                dims_no_axis.push(i);
+            }
+        }
+
+        fn next_coord(coord: &mut [usize], shape: &[usize]) -> bool {
+            // shape.len() == coord.len()
+            for i in (0..coord.len()).rev() {
+                coord[i] += 1;
+                if coord[i] < shape[i] {
+                    return false; // still valid, not done
+                } else {
+                    coord[i] = 0;
+                }
+            }
+            true // all done
+        }
+
+        // We'll track the current coordinate for all dims except `axis`
+        let mut coord = vec![0; rank - 1]; // all zero initially
+        let mut out_idx = 0; // linear index into out_data
+
+        // Main loop: for each "reduced" coordinate...
+        loop {
+            // 1) Compute base offset for these coordinates in the input `data`
+            //    offset = sum_{j} [coord[j] * strides[dims_no_axis[j]]].
+            let mut offset = 0;
+            for (j, &val) in coord.iter().enumerate() {
+                let dim_j = dims_no_axis[j];
+                offset += val * strides[dim_j];
+            }
+
+            // 2) Accumulate the sum along the chosen axis by stepping
+            //    in increments of `axis_stride`.
+            let mut s = T::default();
+            let mut cur = offset;
+            for _ in 0..axis_len {
+                s = s + self.data[cur];
+                cur += axis_stride;
+            }
+
+            // 3) Store in out_data
+            out_data[out_idx] = s;
+            out_idx += 1;
+
+            // 4) Move to the next coordinate
+            if next_coord(&mut coord, &out_shape) {
+                // If we've overflowed, we're done
+                break;
+            }
+        }
+
+        Tensor::new(out_data, out_shape)
     }
 
-    pub fn sum(self, axis: usize) -> Tensor<T> {
-        self.reduction(&|a, b| a + b, axis)
+    pub fn sum(self, axis: usize) -> Tensor<T>
+    where
+        T: std::iter::Sum<T> + Copy,
+    {
+        self.reduction(&|a: &[T]| a.iter().copied().sum(), axis)
     }
 
-    pub fn product(self, axis: usize) -> Tensor<T> {
-        self.reduction(&|a, b| a * b, axis)
-    }
+    // pub fn product(self, axis: usize) -> Tensor<T> {
+    //     self.reduction(&|a, b| a * b, axis)
+    // }
 
-    pub fn max(self, axis: usize) -> Tensor<T> {
-        self.reduction(&|a, b| if a > b { a } else { b }, axis)
-    }
+    // pub fn max(self, axis: usize) -> Tensor<T> {
+    //     self.reduction(&|a, b| if a > b { a } else { b }, axis)
+    // }
 
-    pub fn min(self, axis: usize) -> Tensor<T> {
-        self.reduction(&|a, b| if a < b { a } else { b }, axis)
-    }
+    // pub fn min(self, axis: usize) -> Tensor<T> {
+    //     self.reduction(&|a, b| if a < b { a } else { b }, axis)
+    // }
 }
 
 fn dot2d<T>(a: Tensor<T>, b: Tensor<T>) -> Tensor<T>
